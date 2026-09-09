@@ -1,0 +1,24 @@
+# Visual Studio / C# build outputs
+*.exe
+*.dll
+*.pdb
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# OS / Temporary files
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.tmp
+*.log
+
+# Screenshots and images with sensitive information
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.bmp
+

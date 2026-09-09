@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFrameworks>net472;net8.0-windows</TargetFrameworks>
+    <UseWPF>true</UseWPF>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <AssemblyName>RecentWorkspaceWidget</AssemblyName>
+    <RootNamespace>RecentWorkspaceWidget</RootNamespace>
+    <Nullable>disable</Nullable>
+    <Authors>RecentWorkspaceTool Contributors</Authors>
+    <Description>VisionOS-style Recent Workspace Widget and AI Agent Launcher</Description>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net472'">
+    <Reference Include="PresentationCore" />
+    <Reference Include="PresentationFramework" />
+    <Reference Include="WindowsBase" />
+    <Reference Include="System.Xaml" />
+    <Reference Include="Microsoft.CSharp" />
+  </ItemGroup>
+
+</Project>
