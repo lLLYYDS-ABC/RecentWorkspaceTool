@@ -1035,7 +1035,9 @@ namespace RecentWorkspaceWidget.UI
 
                 TextBlock dateBlock = new TextBlock
                 {
-                    Text = item.LastActive.ToString("MM-dd"),
+                    Text = item.LastActive.Date == DateTime.Today
+                        ? item.LastActive.ToString("HH:mm")
+                        : (item.LastActive.Date == DateTime.Today.AddDays(-1) ? "昨天" : item.LastActive.ToString("MM-dd")),
                     Foreground = new SolidColorBrush(Color.FromRgb(127, 145, 143)),
                     FontSize = 11,
                     FontFamily = new FontFamily("Segoe UI, Microsoft YaHei UI"),

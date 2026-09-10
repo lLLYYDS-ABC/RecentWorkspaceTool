@@ -8,6 +8,33 @@ obj/
 *.suo
 .vs/
 
+# Local credentials, secrets, and developer sessions
+.env
+.env.*
+!.env.example
+*.secret
+secrets.*
+credentials.*
+.npmrc
+!.npmrc.example
+.claude/
+.codex/
+
+# Local databases, certificates, dumps, and editor caches
+*.db
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+*.pfx
+*.p12
+*.publishsettings
+*.dmp
+*.bak
+*.cache
+TestResults/
+coverage/
+
 # OS / Temporary files
 Thumbs.db
 Desktop.ini
@@ -21,4 +48,3 @@ $RECYCLE.BIN/
 *.jpeg
 *.webp
 *.bmp
-

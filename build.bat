@@ -2,6 +2,8 @@
 chcp 65001 >nul
 echo [INFO] 正在编译 AI Workspace Launcher...
 
+taskkill /f /im RecentWorkspaceWidget.exe >nul 2>&1
+
 set CSC_PATH=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
 
 if not exist "%CSC_PATH%" (
