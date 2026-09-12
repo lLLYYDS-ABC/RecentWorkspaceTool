@@ -1,4 +1,5 @@
 using System;
+using System.Text;
 using System.Threading;
 using System.Windows;
 using RecentWorkspaceWidget.UI;
@@ -13,6 +14,29 @@ namespace RecentWorkspaceWidget
         [STAThread]
         public static void Main()
         {
+            // Try to register code pages provider dynamically if running on .NET Core / .NET 8
+            try
+            {
+                Type providerType = Type.GetType("System.Text.CodePagesEncodingProvider, System.Text.Encoding.CodePages");
+                if (providerType != null)
+                {
+                    var instanceProp = providerType.GetProperty("Instance");
+                    if (instanceProp != null)
+                    {
+                        object instance = instanceProp.GetValue(null, null);
+                        if (instance != null)
+                        {
+                            var regMethod = typeof(Encoding).GetMethod("RegisterProvider", new Type[] { typeof(EncodingProvider) });
+                            if (regMethod != null)
+                            {
+                                regMethod.Invoke(null, new object[] { instance });
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+
             bool createdNew;
             using (Mutex mutex = new Mutex(true, MutexName, out createdNew))
             {

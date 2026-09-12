@@ -39,6 +39,10 @@ namespace RecentWorkspaceWidget.UI
         private DateTime lastScanTime = DateTime.MinValue;
         private bool hasLoadedWorkspaces = false;
         private bool isRefreshing = false;
+        private bool isContextMenuOpen = false;
+        private bool isExitingApplication = false;
+        private string lastScanError = null;
+
         private DispatcherTimer filterTimer;
         private DispatcherTimer copyFeedbackTimer;
 
@@ -48,6 +52,8 @@ namespace RecentWorkspaceWidget.UI
         private StackPanel listPanel;
         private ScrollViewer scrollViewer;
         private TextBlock footerLeft;
+        private TextBlock footerRight;
+        private TextBlock headerStatusText;
 
         // Cached Brushes for Agent Selector
         private static readonly SolidColorBrush TabActiveBg = Brushes.White;
@@ -57,10 +63,11 @@ namespace RecentWorkspaceWidget.UI
         private static readonly SolidColorBrush TabInactiveBorder = Brushes.Transparent;
         private static readonly SolidColorBrush TabInactiveFg = new SolidColorBrush(Color.FromRgb(118, 136, 134));
         private static readonly SolidColorBrush TabHoverBg = new SolidColorBrush(Color.FromArgb(120, 255, 255, 255));
+        private static readonly SolidColorBrush TabDisabledFg = new SolidColorBrush(Color.FromRgb(175, 185, 183));
 
         public VisionOSPalette()
         {
-            this.Title = "最近工作空间 - AI Agent 启动中心";
+            this.Title = "最近工作空间启动器";
             this.Width = 848;
             this.Height = 588;
             this.WindowStyle = WindowStyle.None;
@@ -76,6 +83,10 @@ namespace RecentWorkspaceWidget.UI
             this.ShowInTaskbar = false;
 
             AgentDetector.Initialize();
+            currentAgent = AgentDetector.GetFirstAvailableCliAgent();
+
+            // Hook process launch feedback
+            ProcessLauncher.StatusFeedbackCallback = OnProcessLaunchStatus;
 
             BuildUI();
             this.PreviewKeyDown += Window_PreviewKeyDown;
@@ -93,6 +104,30 @@ namespace RecentWorkspaceWidget.UI
                 WakeUpPalette();
             };
 
+            this.Closing += (s, e) =>
+            {
+                if (!isExitingApplication)
+                {
+                    e.Cancel = true;
+                    HidePalette();
+                }
+            };
+
+            this.Deactivated += (s, e) =>
+            {
+                if (isContextMenuOpen) return;
+                if (this.IsLoaded && this.Visibility == Visibility.Visible)
+                {
+                    this.Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        if (!isContextMenuOpen && !this.IsActive && this.Visibility == Visibility.Visible)
+                        {
+                            HidePalette();
+                        }
+                    }), DispatcherPriority.Input);
+                }
+            };
+
             this.Closed += (s, e) =>
             {
                 IntPtr hwnd = new WindowInteropHelper(this).Handle;
@@ -101,7 +136,6 @@ namespace RecentWorkspaceWidget.UI
                 Win32Api.UnregisterHotKey(hwnd, Win32Api.HOTKEY_ID_ALTSPACE);
             };
 
-            // Kernel Event IPC Listener
             ThreadPool.QueueUserWorkItem((state) =>
             {
                 while (true)
@@ -123,6 +157,21 @@ namespace RecentWorkspaceWidget.UI
             });
         }
 
+        private void OnProcessLaunchStatus(string message, bool isSuccess)
+        {
+            if (this.Dispatcher == null) return;
+            this.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (footerLeft != null)
+                {
+                    footerLeft.Text = (isSuccess ? "✓ " : "⚠ ") + message;
+                    footerLeft.Foreground = isSuccess ? ThemeBrushes.StatusGreen : ThemeBrushes.StatusWarn;
+                    copyFeedbackTimer.Stop();
+                    copyFeedbackTimer.Start();
+                }
+            }));
+        }
+
         private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
             if (msg == Win32Api.WM_HOTKEY)
@@ -130,7 +179,7 @@ namespace RecentWorkspaceWidget.UI
                 int id = wParam.ToInt32();
                 if (id == Win32Api.HOTKEY_ID_ALTW || id == Win32Api.HOTKEY_ID_ALTO || id == Win32Api.HOTKEY_ID_ALTSPACE)
                 {
-                    if (this.Visibility == Visibility.Visible)
+                    if (this.Visibility == Visibility.Visible && this.IsActive)
                         HidePalette();
                     else
                         WakeUpPalette();
@@ -161,6 +210,7 @@ namespace RecentWorkspaceWidget.UI
                 }
             }
 
+            this.Show();
             this.Visibility = Visibility.Visible;
             this.WindowState = WindowState.Normal;
             this.Topmost = true;
@@ -168,8 +218,8 @@ namespace RecentWorkspaceWidget.UI
             try
             {
                 IntPtr hwnd = new WindowInteropHelper(this).Handle;
-                Win32Api.BringWindowToTop(hwnd);
                 Win32Api.SetForegroundWindow(hwnd);
+                Win32Api.BringWindowToTop(hwnd);
             }
             catch { }
 
@@ -180,7 +230,8 @@ namespace RecentWorkspaceWidget.UI
                 Keyboard.Focus(searchBox);
             }
 
-            if (!hasLoadedWorkspaces || (DateTime.Now - lastScanTime).TotalSeconds > 30)
+            // Periodically refresh if stale (> 45s)
+            if (!hasLoadedWorkspaces || (DateTime.Now - lastScanTime).TotalSeconds > 45)
             {
                 RefreshWorkspacesAsync(false);
             }
@@ -200,10 +251,39 @@ namespace RecentWorkspaceWidget.UI
                         mi.cbSize = Marshal.SizeOf(typeof(Win32Api.MONITORINFO));
                         if (Win32Api.GetMonitorInfo(hMon, ref mi))
                         {
-                            double workLeft = mi.rcWork.Left;
-                            double workTop = mi.rcWork.Top;
-                            double workWidth = mi.rcWork.Right - mi.rcWork.Left;
-                            double workHeight = mi.rcWork.Bottom - mi.rcWork.Top;
+                            double dpiX = 96.0;
+                            double dpiY = 96.0;
+
+                            try
+                            {
+                                var source = PresentationSource.FromVisual(this);
+                                if (source != null && source.CompositionTarget != null)
+                                {
+                                    dpiX = 96.0 * source.CompositionTarget.TransformToDevice.M11;
+                                    dpiY = 96.0 * source.CompositionTarget.TransformToDevice.M22;
+                                }
+                                else
+                                {
+                                    IntPtr hdc = Win32Api.GetDC(IntPtr.Zero);
+                                    if (hdc != IntPtr.Zero)
+                                    {
+                                        dpiX = Win32Api.GetDeviceCaps(hdc, Win32Api.LOGPIXELSX);
+                                        dpiY = Win32Api.GetDeviceCaps(hdc, Win32Api.LOGPIXELSY);
+                                        Win32Api.ReleaseDC(IntPtr.Zero, hdc);
+                                    }
+                                }
+                            }
+                            catch { }
+
+                            double scaleX = dpiX / 96.0;
+                            double scaleY = dpiY / 96.0;
+                            if (scaleX <= 0) scaleX = 1.0;
+                            if (scaleY <= 0) scaleY = 1.0;
+
+                            double workLeft = mi.rcWork.Left / scaleX;
+                            double workTop = mi.rcWork.Top / scaleY;
+                            double workWidth = (mi.rcWork.Right - mi.rcWork.Left) / scaleX;
+                            double workHeight = (mi.rcWork.Bottom - mi.rcWork.Top) / scaleY;
 
                             this.Left = workLeft + (workWidth - this.Width) / 2;
                             this.Top = workTop + (workHeight - this.Height) / 2;
@@ -221,6 +301,7 @@ namespace RecentWorkspaceWidget.UI
         public void HidePalette()
         {
             this.Visibility = Visibility.Hidden;
+            // Never execute synchronous blocking GC on hide!
             MemoryOptimizer.TrimMemory();
         }
 
@@ -229,18 +310,18 @@ namespace RecentWorkspaceWidget.UI
             Border shadowChassis = new Border
             {
                 Margin = new Thickness(14),
-                CornerRadius = new CornerRadius(16),
-                Background = new SolidColorBrush(Color.FromRgb(250, 251, 250)),
-                BorderBrush = new SolidColorBrush(Color.FromRgb(218, 223, 221)),
+                CornerRadius = new CornerRadius(14),
+                Background = ThemeBrushes.WindowBg,
+                BorderBrush = ThemeBrushes.WindowBorder,
                 BorderThickness = new Thickness(1),
                 SnapsToDevicePixels = true,
                 Effect = new DropShadowEffect
                 {
-                    BlurRadius = 24,
-                    ShadowDepth = 4,
+                    BlurRadius = 20,
+                    ShadowDepth = 3,
                     Direction = 270,
                     Color = Color.FromRgb(0, 0, 0),
-                    Opacity = 0.14
+                    Opacity = 0.12
                 }
             };
 
@@ -250,6 +331,32 @@ namespace RecentWorkspaceWidget.UI
                     this.DragMove();
             };
 
+            shadowChassis.MouseRightButtonUp += (s, e) =>
+            {
+                ContextMenu bgMenu = new ContextMenu
+                {
+                    FontSize = 12,
+                    FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI")
+                };
+
+                MenuItem miRefresh = new MenuItem { Header = "刷新工作空间列表" };
+                miRefresh.Click += (ms, me) => RefreshWorkspacesAsync(true);
+
+                MenuItem miExit = new MenuItem { Header = "退出启动器程序" };
+                miExit.Click += (ms, me) => ExitApplication();
+
+                bgMenu.Items.Add(miRefresh);
+                bgMenu.Items.Add(new Separator());
+                bgMenu.Items.Add(miExit);
+
+                bgMenu.Opened += (ms, me) => { isContextMenuOpen = true; };
+                bgMenu.Closed += (ms, me) => { isContextMenuOpen = false; };
+
+                bgMenu.PlacementTarget = shadowChassis;
+                bgMenu.IsOpen = true;
+                e.Handled = true;
+            };
+
             Grid mainGrid = new Grid();
             mainGrid.SnapsToDevicePixels = true;
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Row 0: Header
@@ -257,7 +364,7 @@ namespace RecentWorkspaceWidget.UI
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // Row 2: List
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Row 3: Footer
 
-            // --- Row 0: Header with Agent Segmented Tabs ---
+            // --- Row 0: Header ---
             Grid headerPanel = new Grid { Margin = new Thickness(24, 18, 24, 12) };
             headerPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             headerPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -268,7 +375,7 @@ namespace RecentWorkspaceWidget.UI
             {
                 Width = 8,
                 Height = 8,
-                Fill = new SolidColorBrush(Color.FromRgb(56, 178, 133)),
+                Fill = new SolidColorBrush(Color.FromRgb(45, 165, 120)),
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 9, 0),
                 SnapsToDevicePixels = true
@@ -276,7 +383,7 @@ namespace RecentWorkspaceWidget.UI
 
             TextBlock titleBlock = new TextBlock
             {
-                Text = "最近工作空间",
+                Text = "工作空间启动器",
                 FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
                 FontSize = 15,
                 FontWeight = FontWeights.Bold,
@@ -284,9 +391,20 @@ namespace RecentWorkspaceWidget.UI
                 VerticalAlignment = VerticalAlignment.Center
             };
 
+            headerStatusText = new TextBlock
+            {
+                Text = "",
+                FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
+                FontSize = 11,
+                Foreground = ThemeBrushes.StatusText,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(14, 0, 0, 0)
+            };
+
             StackPanel brand = new StackPanel { Orientation = Orientation.Horizontal };
             brand.Children.Add(greenDot);
             brand.Children.Add(titleBlock);
+            brand.Children.Add(headerStatusText);
             Grid.SetColumn(brand, 0);
             headerPanel.Children.Add(brand);
 
@@ -308,7 +426,10 @@ namespace RecentWorkspaceWidget.UI
             foreach (var agent in availableAgents)
             {
                 AgentType at = agent;
+                AgentInfo info = AgentDetector.GetAgent(at);
+                bool isInstalled = (info != null && info.IsInstalled);
                 string label = GetAgentShortName(at);
+                if (!isInstalled) label += " (未安装)";
                 bool isActive = (at == currentAgent);
 
                 Border pill = new Border
@@ -317,17 +438,18 @@ namespace RecentWorkspaceWidget.UI
                     CornerRadius = new CornerRadius(7),
                     Padding = new Thickness(11, 0, 11, 0),
                     Margin = new Thickness(1, 0, 1, 0),
-                    Cursor = Cursors.Hand,
+                    Cursor = isInstalled ? Cursors.Hand : Cursors.No,
                     Background = isActive ? TabActiveBg : TabInactiveBg,
                     BorderBrush = isActive ? TabActiveBorder : TabInactiveBorder,
-                    BorderThickness = new Thickness(isActive ? 1 : 0)
+                    BorderThickness = new Thickness(isActive ? 1 : 0),
+                    Opacity = isInstalled ? 1.0 : 0.65
                 };
 
                 if (isActive)
                 {
                     pill.Effect = new DropShadowEffect
                     {
-                        BlurRadius = 5,
+                        BlurRadius = 4,
                         ShadowDepth = 1,
                         Direction = 270,
                         Color = Color.FromRgb(0, 0, 0),
@@ -340,7 +462,7 @@ namespace RecentWorkspaceWidget.UI
                     Text = label,
                     FontSize = 11,
                     FontWeight = isActive ? FontWeights.SemiBold : FontWeights.Normal,
-                    Foreground = isActive ? TabActiveFg : TabInactiveFg,
+                    Foreground = isActive ? TabActiveFg : (isInstalled ? TabInactiveFg : TabDisabledFg),
                     FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
                     VerticalAlignment = VerticalAlignment.Center,
                     HorizontalAlignment = HorizontalAlignment.Center
@@ -350,7 +472,7 @@ namespace RecentWorkspaceWidget.UI
 
                 pill.MouseEnter += (s, e) =>
                 {
-                    if (at != currentAgent)
+                    if (at != currentAgent && isInstalled)
                     {
                         pill.Background = TabHoverBg;
                     }
@@ -365,7 +487,20 @@ namespace RecentWorkspaceWidget.UI
 
                 pill.MouseLeftButtonDown += (s, e) =>
                 {
-                    SelectAgent(at);
+                    if (isInstalled)
+                    {
+                        SelectAgent(at);
+                    }
+                    else
+                    {
+                        if (footerLeft != null)
+                        {
+                            footerLeft.Text = string.Format("⚠ {0} 未安装或 CLI 命令不在 PATH 中，无法使用", GetAgentDisplayName(at));
+                            footerLeft.Foreground = ThemeBrushes.StatusWarn;
+                            copyFeedbackTimer.Stop();
+                            copyFeedbackTimer.Start();
+                        }
+                    }
                 };
 
                 agentTabPills[at] = pill;
@@ -383,9 +518,9 @@ namespace RecentWorkspaceWidget.UI
             // --- Row 1: Search Box Capsule ---
             Border searchCapsule = new Border
             {
-                Height = 46,
-                CornerRadius = new CornerRadius(13),
-                Background = new SolidColorBrush(Color.FromRgb(243, 246, 245)),
+                Height = 44,
+                CornerRadius = new CornerRadius(12),
+                Background = new SolidColorBrush(Color.FromRgb(244, 247, 245)),
                 BorderBrush = new SolidColorBrush(Color.FromRgb(220, 226, 224)),
                 BorderThickness = new Thickness(1),
                 Margin = new Thickness(24, 0, 24, 14)
@@ -398,8 +533,8 @@ namespace RecentWorkspaceWidget.UI
             {
                 Text = "⌕",
                 FontFamily = new FontFamily("Segoe UI Symbol"),
-                FontSize = 22,
-                Foreground = new SolidColorBrush(Color.FromRgb(76, 157, 135)),
+                FontSize = 20,
+                Foreground = new SolidColorBrush(Color.FromRgb(70, 150, 125)),
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, -2, 0, 0),
@@ -417,14 +552,14 @@ namespace RecentWorkspaceWidget.UI
                 FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 16, 0),
-                CaretBrush = new SolidColorBrush(Color.FromRgb(68, 157, 132))
+                CaretBrush = new SolidColorBrush(Color.FromRgb(50, 150, 120))
             };
             Grid.SetColumn(searchBox, 1);
 
             placeholderText = new TextBlock
             {
-                Text = "搜索工作空间名称、拼音简拼或路径...",
-                Foreground = new SolidColorBrush(Color.FromRgb(137, 151, 149)),
+                Text = "搜索工作空间名称、拼音首字母或目录路径...",
+                Foreground = new SolidColorBrush(Color.FromRgb(130, 145, 142)),
                 FontSize = 13,
                 FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
                 VerticalAlignment = VerticalAlignment.Center,
@@ -448,14 +583,14 @@ namespace RecentWorkspaceWidget.UI
                 }
             };
 
-            filterTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+            filterTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(40) };
             filterTimer.Tick += (s, e) =>
             {
                 filterTimer.Stop();
                 ExecuteFilter(searchBox.Text);
             };
 
-            copyFeedbackTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1300) };
+            copyFeedbackTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1800) };
             copyFeedbackTimer.Tick += (s, e) =>
             {
                 copyFeedbackTimer.Stop();
@@ -472,7 +607,7 @@ namespace RecentWorkspaceWidget.UI
             // --- Row 2: List of Cards ---
             scrollViewer = new ScrollViewer
             {
-                VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                 Margin = new Thickness(24, 0, 24, 10)
             };
 
@@ -488,17 +623,17 @@ namespace RecentWorkspaceWidget.UI
             footerLeft = new TextBlock
             {
                 Text = GetDefaultFooterText(),
-                Foreground = new SolidColorBrush(Color.FromRgb(125, 140, 138)),
+                Foreground = new SolidColorBrush(Color.FromRgb(115, 130, 128)),
                 FontSize = 11,
                 FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
                 VerticalAlignment = VerticalAlignment.Center
             };
             DockPanel.SetDock(footerLeft, Dock.Left);
 
-            TextBlock footerRight = new TextBlock
+            footerRight = new TextBlock
             {
-                Text = "Alt+W 唤出",
-                Foreground = new SolidColorBrush(Color.FromRgb(125, 140, 138)),
+                Text = "Alt+W 唤出/隐藏  ·  F5 刷新",
+                Foreground = new SolidColorBrush(Color.FromRgb(115, 130, 128)),
                 FontSize = 11,
                 FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
                 HorizontalAlignment = HorizontalAlignment.Right,
@@ -518,6 +653,12 @@ namespace RecentWorkspaceWidget.UI
 
         private void SelectAgent(AgentType agent)
         {
+            AgentInfo info = AgentDetector.GetAgent(agent);
+            if (info != null && !info.IsInstalled)
+            {
+                return; // Do not select uninstalled agent
+            }
+
             if (currentAgent == agent) return;
             currentAgent = agent;
             UpdateAgentTabsVisual();
@@ -528,8 +669,17 @@ namespace RecentWorkspaceWidget.UI
         private void CycleNextAgent()
         {
             int idx = Array.IndexOf(availableAgents, currentAgent);
-            int nextIdx = (idx + 1) % availableAgents.Length;
-            SelectAgent(availableAgents[nextIdx]);
+            for (int i = 1; i <= availableAgents.Length; i++)
+            {
+                int nextIdx = (idx + i) % availableAgents.Length;
+                AgentType next = availableAgents[nextIdx];
+                AgentInfo info = AgentDetector.GetAgent(next);
+                if (info != null && info.IsInstalled)
+                {
+                    SelectAgent(next);
+                    return;
+                }
+            }
         }
 
         private void UpdateAgentTabsVisual()
@@ -539,17 +689,21 @@ namespace RecentWorkspaceWidget.UI
                 AgentType at = kvp.Key;
                 Border pill = kvp.Value;
                 TextBlock text = agentTabTexts[at];
+                AgentInfo info = AgentDetector.GetAgent(at);
+                bool isInstalled = (info != null && info.IsInstalled);
 
                 bool isActive = (at == currentAgent);
                 pill.Background = isActive ? TabActiveBg : TabInactiveBg;
                 pill.BorderBrush = isActive ? TabActiveBorder : TabInactiveBorder;
                 pill.BorderThickness = new Thickness(isActive ? 1 : 0);
+                pill.Opacity = isInstalled ? 1.0 : 0.65;
+                pill.Cursor = isInstalled ? Cursors.Hand : Cursors.No;
 
                 if (isActive)
                 {
                     pill.Effect = new DropShadowEffect
                     {
-                        BlurRadius = 5,
+                        BlurRadius = 4,
                         ShadowDepth = 1,
                         Direction = 270,
                         Color = Color.FromRgb(0, 0, 0),
@@ -562,7 +716,7 @@ namespace RecentWorkspaceWidget.UI
                 {
                     pill.Effect = null;
                     text.FontWeight = FontWeights.Normal;
-                    text.Foreground = TabInactiveFg;
+                    text.Foreground = isInstalled ? TabInactiveFg : TabDisabledFg;
                 }
             }
         }
@@ -584,13 +738,13 @@ namespace RecentWorkspaceWidget.UI
             if (footerLeft != null)
             {
                 footerLeft.Text = GetDefaultFooterText();
-                footerLeft.Foreground = new SolidColorBrush(Color.FromRgb(125, 140, 138));
+                footerLeft.Foreground = new SolidColorBrush(Color.FromRgb(115, 130, 128));
             }
         }
 
         private string GetDefaultFooterText()
         {
-            return string.Format("回车 启动 {0}  ·  ↑↓ 选择项目  ·  Ctrl+C 复制路径  ·  Ctrl+E 资源管理器  ·  Esc 退出", GetAgentDisplayName(currentAgent));
+            return string.Format("双击/回车 启动 {0}  ·  ↑↓ 切换  ·  Ctrl+C 复制路径  ·  Ctrl+E 资源管理器  ·  Esc 清空/隐藏", GetAgentDisplayName(currentAgent));
         }
 
         private string GetAgentShortName(AgentType agent)
@@ -622,16 +776,24 @@ namespace RecentWorkspaceWidget.UI
         {
             switch (agent)
             {
-                case AgentType.OpenCode: return "↵ 启动 OpenCode";
-                case AgentType.ClaudeCode: return "↵ 启动 Claude";
-                case AgentType.Codex: return "↵ 启动 Codex";
-                case AgentType.VSCode: return "↵ 打开 VS Code";
-                default: return "↵ 打开";
+                case AgentType.OpenCode: return "↵ OpenCode";
+                case AgentType.ClaudeCode: return "↵ Claude";
+                case AgentType.Codex: return "↵ Codex";
+                case AgentType.VSCode: return "↵ VS Code";
+                default: return "↵ 启动";
             }
         }
 
         private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
         {
+            // F5: Refresh
+            if (e.Key == Key.F5)
+            {
+                RefreshWorkspacesAsync(true);
+                e.Handled = true;
+                return;
+            }
+
             if (e.Key == Key.Escape)
             {
                 if (searchBox != null && !string.IsNullOrEmpty(searchBox.Text))
@@ -646,7 +808,7 @@ namespace RecentWorkspaceWidget.UI
                 return;
             }
 
-            // Tab key cycles through agents when searchBox is empty, or with Ctrl+Tab
+            // Tab key cycles through installed agents
             if ((e.Key == Key.Tab && (searchBox == null || string.IsNullOrEmpty(searchBox.Text))) ||
                 (e.Key == Key.Tab && Keyboard.Modifiers.HasFlag(ModifierKeys.Control)))
             {
@@ -655,7 +817,7 @@ namespace RecentWorkspaceWidget.UI
                 return;
             }
 
-            // Ctrl + C: Copy selected path to clipboard
+            // Ctrl + C: Copy selected path
             if (e.Key == Key.C && Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
             {
                 if (filteredItems != null && selectedIndex >= 0 && selectedIndex < filteredItems.Count)
@@ -665,8 +827,8 @@ namespace RecentWorkspaceWidget.UI
                         Clipboard.SetText(filteredItems[selectedIndex].Path);
                         if (footerLeft != null)
                         {
-                            footerLeft.Text = "✓ 已复制工作空间路径: " + filteredItems[selectedIndex].Path;
-                            footerLeft.Foreground = new SolidColorBrush(Color.FromRgb(47, 132, 103));
+                            footerLeft.Text = "✓ 已复制路径: " + filteredItems[selectedIndex].Path;
+                            footerLeft.Foreground = ThemeBrushes.StatusGreen;
                             copyFeedbackTimer.Stop();
                             copyFeedbackTimer.Start();
                         }
@@ -688,7 +850,7 @@ namespace RecentWorkspaceWidget.UI
                 }
             }
 
-            // Alt + 1~9: Direct index launch with currently active Agent
+            // Alt + 1~9: Launch corresponding index
             if (Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) && e.Key >= Key.D1 && e.Key <= Key.D9)
             {
                 int digitIndex = e.Key - Key.D1;
@@ -700,7 +862,7 @@ namespace RecentWorkspaceWidget.UI
                 }
             }
 
-            // Direct Enter: Launch with currently active Agent! (No combinations needed!)
+            // Enter: Launch with active Agent
             if (e.Key == Key.Enter)
             {
                 if (filteredItems != null && selectedIndex >= 0 && selectedIndex < filteredItems.Count)
@@ -711,7 +873,7 @@ namespace RecentWorkspaceWidget.UI
                 }
             }
 
-            // Navigation
+            // Up / Down / PageUp / PageDown Navigation
             if (filteredItems != null && filteredItems.Count > 0)
             {
                 if (e.Key == Key.Down)
@@ -728,13 +890,13 @@ namespace RecentWorkspaceWidget.UI
                 }
                 else if (e.Key == Key.PageDown)
                 {
-                    ChangeSelection(Math.Min(filteredItems.Count - 1, selectedIndex + 5));
+                    ChangeSelection(Math.Min(filteredItems.Count - 1, selectedIndex + 6));
                     e.Handled = true;
                     return;
                 }
                 else if (e.Key == Key.PageUp)
                 {
-                    ChangeSelection(Math.Max(0, selectedIndex - 5));
+                    ChangeSelection(Math.Max(0, selectedIndex - 6));
                     e.Handled = true;
                     return;
                 }
@@ -854,10 +1016,8 @@ namespace RecentWorkspaceWidget.UI
 
                     if (match)
                     {
-                        double daysAgo = (DateTime.Now - item.LastActive).TotalDays;
-                        if (daysAgo <= 1) totalScore += 35;
-                        else if (daysAgo <= 3) totalScore += 25;
-                        else if (daysAgo <= 7) totalScore += 15;
+                        // Minor bonus for high credibility
+                        totalScore += (item.Credibility / 2);
 
                         scoredList.Add(new Tuple<int, WorkspaceItem>(totalScore, item));
                     }
@@ -890,14 +1050,47 @@ namespace RecentWorkspaceWidget.UI
             {
                 TextBlock loadingBlock = new TextBlock
                 {
-                    Text = "正在读取最近工作空间...",
-                    Foreground = new SolidColorBrush(Color.FromRgb(127, 143, 141)),
+                    Text = "正在读取本地工作空间...",
+                    Foreground = new SolidColorBrush(Color.FromRgb(125, 140, 138)),
                     FontSize = 13,
                     FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
                     HorizontalAlignment = HorizontalAlignment.Center,
-                    Margin = new Thickness(0, 50, 0, 0)
+                    Margin = new Thickness(0, 60, 0, 0)
                 };
                 listPanel.Children.Add(loadingBlock);
+                return;
+            }
+
+            if (!string.IsNullOrEmpty(lastScanError) && allItems.Count == 0)
+            {
+                StackPanel errStack = new StackPanel
+                {
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(0, 50, 0, 0)
+                };
+
+                TextBlock errBlock = new TextBlock
+                {
+                    Text = "扫描工作空间遇到错误: " + lastScanError,
+                    Foreground = ThemeBrushes.StatusWarn,
+                    FontSize = 13,
+                    FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
+                    HorizontalAlignment = HorizontalAlignment.Center
+                };
+
+                Button retryBtn = new Button
+                {
+                    Content = "重试扫描",
+                    Margin = new Thickness(0, 14, 0, 0),
+                    Padding = new Thickness(14, 4, 14, 4),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Cursor = Cursors.Hand
+                };
+                retryBtn.Click += (s, e) => RefreshWorkspacesAsync(true);
+
+                errStack.Children.Add(errBlock);
+                errStack.Children.Add(retryBtn);
+                listPanel.Children.Add(errStack);
                 return;
             }
 
@@ -905,12 +1098,12 @@ namespace RecentWorkspaceWidget.UI
             {
                 TextBlock emptyBlock = new TextBlock
                 {
-                    Text = "没有匹配的工作空间",
-                    Foreground = new SolidColorBrush(Color.FromRgb(127, 143, 141)),
+                    Text = string.IsNullOrEmpty(searchBox.Text) ? "没有发现有效的工作空间项目" : "没有匹配的工作空间",
+                    Foreground = new SolidColorBrush(Color.FromRgb(125, 140, 138)),
                     FontSize = 13,
                     FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
                     HorizontalAlignment = HorizontalAlignment.Center,
-                    Margin = new Thickness(0, 50, 0, 0)
+                    Margin = new Thickness(0, 60, 0, 0)
                 };
                 listPanel.Children.Add(emptyBlock);
                 return;
@@ -927,13 +1120,14 @@ namespace RecentWorkspaceWidget.UI
                 Border card = new Border
                 {
                     Height = 56,
-                    CornerRadius = new CornerRadius(12),
-                    Margin = new Thickness(0, 3, 0, 3),
-                    Padding = new Thickness(16, 0, 16, 0),
+                    CornerRadius = new CornerRadius(10),
+                    Margin = new Thickness(0, 2, 0, 2),
+                    Padding = new Thickness(14, 0, 14, 0),
                     Cursor = Cursors.Hand,
                     Background = isSelected ? ThemeBrushes.SelectedBg : Brushes.Transparent,
                     BorderBrush = isSelected ? ThemeBrushes.SelectedBorder : Brushes.Transparent,
-                    BorderThickness = new Thickness(isSelected ? 1 : 0)
+                    BorderThickness = new Thickness(isSelected ? 1 : 0),
+                    ToolTip = item.Path
                 };
 
                 Grid rowGrid = new Grid();
@@ -985,25 +1179,55 @@ namespace RecentWorkspaceWidget.UI
 
                 // 3. Info Stack
                 StackPanel infoStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+
+                StackPanel nameRow = new StackPanel { Orientation = Orientation.Horizontal };
                 TextBlock nameBlock = new TextBlock
                 {
                     Text = item.Name,
-                    Foreground = new SolidColorBrush(Color.FromRgb(32, 43, 42)),
+                    Foreground = new SolidColorBrush(Color.FromRgb(30, 42, 40)),
                     FontSize = 13,
                     FontWeight = FontWeights.SemiBold,
                     FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI")
                 };
+                nameRow.Children.Add(nameBlock);
+
+                // Source Badge
+                Border sourceBadge = null;
+                TextBlock sourceText = null;
+                if (!string.IsNullOrEmpty(item.Source))
+                {
+                    sourceBadge = new Border
+                    {
+                        CornerRadius = new CornerRadius(3),
+                        Background = ThemeBrushes.BadgeBg,
+                        BorderBrush = ThemeBrushes.BadgeBorder,
+                        BorderThickness = new Thickness(1),
+                        Padding = new Thickness(5, 1, 5, 1),
+                        Margin = new Thickness(8, 0, 0, 0),
+                        VerticalAlignment = VerticalAlignment.Center
+                    };
+                    sourceText = new TextBlock
+                    {
+                        Text = item.Source,
+                        FontSize = 9.5,
+                        Foreground = ThemeBrushes.BadgeFg,
+                        FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI")
+                    };
+                    sourceBadge.Child = sourceText;
+                    nameRow.Children.Add(sourceBadge);
+                }
+
                 string pathFormatted = item.Path.Replace("\\", " › ");
                 TextBlock pathBlock = new TextBlock
                 {
                     Text = pathFormatted,
                     Foreground = isSelected ? ThemeBrushes.SelectedPath : ThemeBrushes.NormalPath,
-                    FontSize = 10.5,
+                    FontSize = 11,
                     FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
                     TextTrimming = TextTrimming.CharacterEllipsis,
                     Margin = new Thickness(0, 2, 0, 0)
                 };
-                infoStack.Children.Add(nameBlock);
+                infoStack.Children.Add(nameRow);
                 infoStack.Children.Add(pathBlock);
                 Grid.SetColumn(infoStack, 2);
                 rowGrid.Children.Add(infoStack);
@@ -1023,7 +1247,7 @@ namespace RecentWorkspaceWidget.UI
                 TextBlock actionText = new TextBlock
                 {
                     Text = currentActionLabel,
-                    Foreground = new SolidColorBrush(Color.FromRgb(42, 121, 91)),
+                    Foreground = new SolidColorBrush(Color.FromRgb(35, 115, 85)),
                     FontSize = 11,
                     FontWeight = FontWeights.Bold,
                     FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
@@ -1038,7 +1262,7 @@ namespace RecentWorkspaceWidget.UI
                     Text = item.LastActive.Date == DateTime.Today
                         ? item.LastActive.ToString("HH:mm")
                         : (item.LastActive.Date == DateTime.Today.AddDays(-1) ? "昨天" : item.LastActive.ToString("MM-dd")),
-                    Foreground = new SolidColorBrush(Color.FromRgb(127, 145, 143)),
+                    Foreground = new SolidColorBrush(Color.FromRgb(125, 140, 138)),
                     FontSize = 11,
                     FontFamily = new FontFamily("Segoe UI, Microsoft YaHei UI"),
                     VerticalAlignment = VerticalAlignment.Center,
@@ -1051,6 +1275,7 @@ namespace RecentWorkspaceWidget.UI
 
                 Border currentCard = card;
                 int currentIndex = index;
+
                 currentCard.MouseEnter += (s, e) =>
                 {
                     if (currentIndex != selectedIndex)
@@ -1066,13 +1291,18 @@ namespace RecentWorkspaceWidget.UI
                     }
                 };
 
-                // Left click: Launch with currently active Agent
+                // Single Click: Select item only (satisfies requirement 5: prevents misclicks)
                 card.MouseLeftButtonDown += (s, e) =>
                 {
-                    LaunchWorkspace(item, currentAgent);
+                    ChangeSelection(currentIndex);
+                    if (e.ClickCount == 2)
+                    {
+                        // Double Click: Launch workspace!
+                        LaunchWorkspace(item, currentAgent);
+                    }
                 };
 
-                // Right click: Open Agent Selection Context Menu
+                // Right click: Context Menu
                 card.MouseRightButtonUp += (s, e) =>
                 {
                     ChangeSelection(currentIndex);
@@ -1091,6 +1321,8 @@ namespace RecentWorkspaceWidget.UI
                     DrivePill = drivePill,
                     DriveText = driveText,
                     NameBlock = nameBlock,
+                    SourceBadge = sourceBadge,
+                    SourceText = sourceText,
                     PathBlock = pathBlock,
                     ActionBtn = actionBtn,
                     ActionText = actionText,
@@ -1108,22 +1340,46 @@ namespace RecentWorkspaceWidget.UI
                 FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI")
             };
 
-            MenuItem miOpenCode = new MenuItem { Header = "启动 OpenCode", FontWeight = (currentAgent == AgentType.OpenCode ? FontWeights.Bold : FontWeights.Normal) };
+            AgentInfo infoOpenCode = AgentDetector.GetAgent(AgentType.OpenCode);
+            MenuItem miOpenCode = new MenuItem
+            {
+                Header = "启动 OpenCode" + (infoOpenCode != null && !infoOpenCode.IsInstalled ? " (未安装)" : ""),
+                IsEnabled = (infoOpenCode != null && infoOpenCode.IsInstalled),
+                FontWeight = (currentAgent == AgentType.OpenCode ? FontWeights.Bold : FontWeights.Normal)
+            };
             miOpenCode.Click += (s, e) => LaunchWorkspace(item, AgentType.OpenCode);
 
-            MenuItem miClaude = new MenuItem { Header = "启动 Claude Code", FontWeight = (currentAgent == AgentType.ClaudeCode ? FontWeights.Bold : FontWeights.Normal) };
+            AgentInfo infoClaude = AgentDetector.GetAgent(AgentType.ClaudeCode);
+            MenuItem miClaude = new MenuItem
+            {
+                Header = "启动 Claude Code" + (infoClaude != null && !infoClaude.IsInstalled ? " (未安装)" : ""),
+                IsEnabled = (infoClaude != null && infoClaude.IsInstalled),
+                FontWeight = (currentAgent == AgentType.ClaudeCode ? FontWeights.Bold : FontWeights.Normal)
+            };
             miClaude.Click += (s, e) => LaunchWorkspace(item, AgentType.ClaudeCode);
 
-            MenuItem miCodex = new MenuItem { Header = "启动 OpenAI Codex", FontWeight = (currentAgent == AgentType.Codex ? FontWeights.Bold : FontWeights.Normal) };
+            AgentInfo infoCodex = AgentDetector.GetAgent(AgentType.Codex);
+            MenuItem miCodex = new MenuItem
+            {
+                Header = "启动 OpenAI Codex" + (infoCodex != null && !infoCodex.IsInstalled ? " (未安装)" : ""),
+                IsEnabled = (infoCodex != null && infoCodex.IsInstalled),
+                FontWeight = (currentAgent == AgentType.Codex ? FontWeights.Bold : FontWeights.Normal)
+            };
             miCodex.Click += (s, e) => LaunchWorkspace(item, AgentType.Codex);
 
-            MenuItem miVSCode = new MenuItem { Header = "在 VS Code 中打开", FontWeight = (currentAgent == AgentType.VSCode ? FontWeights.Bold : FontWeights.Normal) };
+            AgentInfo infoVSCode = AgentDetector.GetAgent(AgentType.VSCode);
+            MenuItem miVSCode = new MenuItem
+            {
+                Header = "在 VS Code 中打开" + (infoVSCode != null && !infoVSCode.IsInstalled ? " (未安装)" : ""),
+                IsEnabled = (infoVSCode != null && infoVSCode.IsInstalled),
+                FontWeight = (currentAgent == AgentType.VSCode ? FontWeights.Bold : FontWeights.Normal)
+            };
             miVSCode.Click += (s, e) => LaunchWorkspace(item, AgentType.VSCode);
 
             MenuItem miExplorer = new MenuItem { Header = "在资源管理器中打开" };
             miExplorer.Click += (s, e) => LaunchWorkspace(item, AgentType.Explorer);
 
-            MenuItem miCopy = new MenuItem { Header = "复制工作空间路径" };
+            MenuItem miCopy = new MenuItem { Header = "复制工作空间完整路径" };
             miCopy.Click += (s, e) =>
             {
                 try
@@ -1131,14 +1387,20 @@ namespace RecentWorkspaceWidget.UI
                     Clipboard.SetText(item.Path);
                     if (footerLeft != null)
                     {
-                        footerLeft.Text = "✓ 已复制工作空间路径: " + item.Path;
-                        footerLeft.Foreground = new SolidColorBrush(Color.FromRgb(47, 132, 103));
+                        footerLeft.Text = "✓ 已复制路径: " + item.Path;
+                        footerLeft.Foreground = ThemeBrushes.StatusGreen;
                         copyFeedbackTimer.Stop();
                         copyFeedbackTimer.Start();
                     }
                 }
                 catch { }
             };
+
+            MenuItem miRefresh = new MenuItem { Header = "重新扫描列表" };
+            miRefresh.Click += (s, e) => RefreshWorkspacesAsync(true);
+
+            MenuItem miExit = new MenuItem { Header = "退出启动器" };
+            miExit.Click += (s, e) => ExitApplication();
 
             menu.Items.Add(miOpenCode);
             menu.Items.Add(miClaude);
@@ -1147,42 +1409,122 @@ namespace RecentWorkspaceWidget.UI
             menu.Items.Add(new Separator());
             menu.Items.Add(miExplorer);
             menu.Items.Add(miCopy);
+            menu.Items.Add(new Separator());
+            menu.Items.Add(miRefresh);
+            menu.Items.Add(miExit);
+
+            menu.Opened += (s, e) => { isContextMenuOpen = true; };
+            menu.Closed += (s, e) => { isContextMenuOpen = false; };
 
             return menu;
+        }
+
+        private void ExitApplication()
+        {
+            isExitingApplication = true;
+            try
+            {
+                IntPtr hwnd = new WindowInteropHelper(this).Handle;
+                Win32Api.UnregisterHotKey(hwnd, Win32Api.HOTKEY_ID_ALTW);
+                Win32Api.UnregisterHotKey(hwnd, Win32Api.HOTKEY_ID_ALTO);
+                Win32Api.UnregisterHotKey(hwnd, Win32Api.HOTKEY_ID_ALTSPACE);
+            }
+            catch { }
+
+            Application.Current.Shutdown();
         }
 
         private void LaunchWorkspace(WorkspaceItem item, AgentType type)
         {
             if (item == null) return;
+
+            string validationError;
+            if (!ProcessLauncher.ValidateLaunch(item, type, out validationError))
+            {
+                if (footerLeft != null)
+                {
+                    footerLeft.Text = "⚠ " + validationError;
+                    footerLeft.Foreground = ThemeBrushes.StatusWarn;
+                    copyFeedbackTimer.Stop();
+                    copyFeedbackTimer.Start();
+                }
+                return;
+            }
+
             HidePalette();
-            ProcessLauncher.Launch(item, type);
+
+            string launchError;
+            if (!ProcessLauncher.Launch(item, type, out launchError))
+            {
+                WakeUpPalette();
+                if (footerLeft != null)
+                {
+                    footerLeft.Text = "⚠ " + (launchError ?? "启动失败");
+                    footerLeft.Foreground = ThemeBrushes.StatusWarn;
+                }
+            }
         }
 
         private void RefreshWorkspacesAsync(bool forceRender = false)
         {
             if (isRefreshing) return;
             isRefreshing = true;
+            lastScanError = null;
+
+            if (headerStatusText != null)
+            {
+                headerStatusText.Text = "扫描中...";
+            }
+
             ThreadPool.QueueUserWorkItem((state) =>
             {
                 try
                 {
+                    AgentDetector.Initialize(true);
                     List<WorkspaceItem> list = WorkspaceScanner.ScanDirectories();
+
                     this.Dispatcher.BeginInvoke(new Action(() =>
                     {
                         this.allItems = list;
                         this.hasLoadedWorkspaces = true;
                         this.lastScanTime = DateTime.Now;
                         this.isRefreshing = false;
+
+                        if (headerStatusText != null)
+                        {
+                            headerStatusText.Text = string.Format("已更新 {0}", lastScanTime.ToString("HH:mm:ss"));
+                        }
+
+                        // Ensure currentAgent is installed
+                        AgentInfo curInfo = AgentDetector.GetAgent(currentAgent);
+                        if (curInfo == null || !curInfo.IsInstalled)
+                        {
+                            currentAgent = AgentDetector.GetFirstAvailableCliAgent();
+                        }
+
+                        UpdateAgentTabsVisual();
+
                         if (forceRender || this.Visibility == Visibility.Visible)
                         {
                             ExecuteFilter(searchBox != null ? searchBox.Text : "");
                         }
-                        MemoryOptimizer.TrimMemory();
                     }));
                 }
-                catch
+                catch (Exception ex)
                 {
-                    this.Dispatcher.BeginInvoke(new Action(() => { this.isRefreshing = false; }));
+                    this.Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        this.isRefreshing = false;
+                        this.lastScanError = ex.Message;
+                        if (headerStatusText != null)
+                        {
+                            headerStatusText.Text = "扫描失败";
+                        }
+                        if (forceRender || this.Visibility == Visibility.Visible)
+                        {
+                            ExecuteFilter(searchBox != null ? searchBox.Text : "");
+                        }
+                    }));
                 }
             });
         }

@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace RecentWorkspaceWidget.Native
 {
@@ -28,6 +29,15 @@ namespace RecentWorkspaceWidget.Native
 
         [DllImport("kernel32.dll")]
         public static extern bool SetProcessWorkingSetSize(IntPtr proc, int min, int max);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
 
         [StructLayout(LayoutKind.Sequential)]
         public struct POINT
@@ -60,5 +70,17 @@ namespace RecentWorkspaceWidget.Native
         public const int HOTKEY_ID_ALTSPACE = 9003;
         public const int MOD_ALT = 0x0001;
         public const uint MONITOR_DEFAULTTONEAREST = 2;
+
+        [DllImport("gdi32.dll")]
+        public static extern int GetDeviceCaps(IntPtr hdc, int nIndex);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetDC(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        public const int LOGPIXELSX = 88;
+        public const int LOGPIXELSY = 90;
     }
 }

@@ -11,12 +11,12 @@ namespace RecentWorkspaceWidget.Services
         private static bool isInitialized = false;
         private static readonly object initLock = new object();
 
-        public static void Initialize()
+        public static void Initialize(bool forceRefresh = false)
         {
-            if (isInitialized) return;
+            if (isInitialized && !forceRefresh) return;
             lock (initLock)
             {
-                if (isInitialized) return;
+                if (isInitialized && !forceRefresh) return;
 
                 CachedAgents[AgentType.OpenCode] = DetectOpenCode();
                 CachedAgents[AgentType.ClaudeCode] = DetectClaudeCode();
@@ -28,7 +28,7 @@ namespace RecentWorkspaceWidget.Services
                     Name = "资源管理器",
                     KeyHint = "Ctrl+E",
                     IsInstalled = true,
-                    ExecutablePath = "explorer.exe",
+                    ExecutablePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe"),
                     CommandTemplate = "explorer.exe \"{path}\""
                 };
 
@@ -50,10 +50,55 @@ namespace RecentWorkspaceWidget.Services
             return CachedAgents.Values;
         }
 
+        public static AgentType GetFirstAvailableCliAgent()
+        {
+            if (!isInitialized) Initialize();
+            AgentType[] cliOrder = new AgentType[]
+            {
+                AgentType.OpenCode,
+                AgentType.Codex,
+                AgentType.ClaudeCode,
+                AgentType.VSCode
+            };
+
+            foreach (var type in cliOrder)
+            {
+                AgentInfo info;
+                if (CachedAgents.TryGetValue(type, out info) && info != null && info.IsInstalled)
+                {
+                    return type;
+                }
+            }
+
+            return AgentType.VSCode;
+        }
+
+        public static bool HasAnyCliAgentAvailable()
+        {
+            if (!isInitialized) Initialize();
+            AgentType[] cliOrder = new AgentType[]
+            {
+                AgentType.OpenCode,
+                AgentType.Codex,
+                AgentType.ClaudeCode,
+                AgentType.VSCode
+            };
+
+            foreach (var type in cliOrder)
+            {
+                AgentInfo info;
+                if (CachedAgents.TryGetValue(type, out info) && info != null && info.IsInstalled)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         private static AgentInfo DetectOpenCode()
         {
             string exec = FindCommandInPath("opencode");
-            bool installed = !string.IsNullOrEmpty(exec);
+            bool installed = !string.IsNullOrEmpty(exec) && File.Exists(exec);
 
             return new AgentInfo
             {
@@ -61,7 +106,7 @@ namespace RecentWorkspaceWidget.Services
                 Name = "OpenCode",
                 KeyHint = "Enter",
                 IsInstalled = installed,
-                ExecutablePath = exec ?? "opencode",
+                ExecutablePath = exec,
                 CommandTemplate = "title OpenCode: {name} && cd /d \"{path}\" && opencode ."
             };
         }
@@ -69,16 +114,7 @@ namespace RecentWorkspaceWidget.Services
         private static AgentInfo DetectClaudeCode()
         {
             string exec = FindCommandInPath("claude");
-            bool installed = !string.IsNullOrEmpty(exec);
-            if (!installed)
-            {
-                // Also check if user has .claude directory configured
-                string userClaude = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude");
-                if (Directory.Exists(userClaude))
-                {
-                    installed = true;
-                }
-            }
+            bool installed = !string.IsNullOrEmpty(exec) && File.Exists(exec);
 
             return new AgentInfo
             {
@@ -86,7 +122,7 @@ namespace RecentWorkspaceWidget.Services
                 Name = "Claude Code",
                 KeyHint = "Shift+Enter",
                 IsInstalled = installed,
-                ExecutablePath = exec ?? "claude",
+                ExecutablePath = exec,
                 CommandTemplate = "title Claude: {name} && cd /d \"{path}\" && claude"
             };
         }
@@ -94,15 +130,7 @@ namespace RecentWorkspaceWidget.Services
         private static AgentInfo DetectCodex()
         {
             string exec = FindCommandInPath("codex");
-            bool installed = !string.IsNullOrEmpty(exec);
-            if (!installed)
-            {
-                string userCodex = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
-                if (Directory.Exists(userCodex))
-                {
-                    installed = true;
-                }
-            }
+            bool installed = !string.IsNullOrEmpty(exec) && File.Exists(exec);
 
             return new AgentInfo
             {
@@ -110,7 +138,7 @@ namespace RecentWorkspaceWidget.Services
                 Name = "OpenAI Codex",
                 KeyHint = "Alt+Enter",
                 IsInstalled = installed,
-                ExecutablePath = exec ?? "codex",
+                ExecutablePath = exec,
                 CommandTemplate = "title Codex: {name} && cd /d \"{path}\" && codex"
             };
         }
@@ -118,7 +146,7 @@ namespace RecentWorkspaceWidget.Services
         private static AgentInfo DetectVSCode()
         {
             string exec = FindCommandInPath("code");
-            bool installed = !string.IsNullOrEmpty(exec);
+            bool installed = !string.IsNullOrEmpty(exec) && File.Exists(exec);
 
             return new AgentInfo
             {
@@ -126,31 +154,60 @@ namespace RecentWorkspaceWidget.Services
                 Name = "VS Code",
                 KeyHint = "Ctrl+Enter",
                 IsInstalled = installed,
-                ExecutablePath = exec ?? "code",
+                ExecutablePath = exec,
                 CommandTemplate = "code \"{path}\""
             };
         }
 
-        private static string FindCommandInPath(string cmdName)
+        public static string FindCommandInPath(string cmdName)
         {
-            string[] extensions = new string[] { ".cmd", ".exe", ".bat", ".ps1", "" };
+            if (string.IsNullOrEmpty(cmdName)) return null;
+
+            if (Path.IsPathRooted(cmdName) && File.Exists(cmdName))
+            {
+                return cmdName;
+            }
+
+            // Search order: .cmd, .exe, .bat first for native execution; .ps1 as script alternative
+            string[] primaryExts = new string[] { ".cmd", ".exe", ".bat", "" };
+            string[] scriptExts = new string[] { ".ps1" };
+
             string pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
-            
-            // Add npm global paths and common locations
             List<string> searchDirs = new List<string>(pathEnv.Split(new char[] { Path.PathSeparator }, StringSplitOptions.RemoveEmptyEntries));
-            
+
             string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             string progFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
             string progFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
-            string[] additionalDirs = new string[]
+            List<string> additionalDirs = new List<string>
             {
                 Path.Combine(appData, "npm"),
+                Path.Combine(userProfile, @"AppData\Roaming\npm"),
                 Path.Combine(localAppData, @"Programs\Microsoft VS Code\bin"),
+                Path.Combine(localAppData, @"Programs\Microsoft VS Code"),
                 Path.Combine(progFiles, @"Microsoft VS Code\bin"),
+                Path.Combine(progFiles, @"Microsoft VS Code"),
                 Path.Combine(progFilesX86, @"Microsoft VS Code\bin")
             };
+
+            // Check npm-global across fixed drives
+            try
+            {
+                foreach (var drive in DriveInfo.GetDrives())
+                {
+                    if (drive.IsReady && drive.DriveType == DriveType.Fixed)
+                    {
+                        string driveNpm = Path.Combine(drive.RootDirectory.FullName, "npm-global");
+                        if (Directory.Exists(driveNpm) && !additionalDirs.Contains(driveNpm))
+                        {
+                            additionalDirs.Add(driveNpm);
+                        }
+                    }
+                }
+            }
+            catch { }
 
             foreach (var ad in additionalDirs)
             {
@@ -160,11 +217,27 @@ namespace RecentWorkspaceWidget.Services
                 }
             }
 
+            // 1. Check primary binary/batch extensions first
             foreach (string dir in searchDirs)
             {
                 if (!Directory.Exists(dir)) continue;
 
-                foreach (string ext in extensions)
+                foreach (string ext in primaryExts)
+                {
+                    string candidate = Path.Combine(dir, cmdName + ext);
+                    if (File.Exists(candidate))
+                    {
+                        return candidate;
+                    }
+                }
+            }
+
+            // 2. Check PowerShell scripts if no native cmd/exe was found
+            foreach (string dir in searchDirs)
+            {
+                if (!Directory.Exists(dir)) continue;
+
+                foreach (string ext in scriptExts)
                 {
                     string candidate = Path.Combine(dir, cmdName + ext);
                     if (File.Exists(candidate))

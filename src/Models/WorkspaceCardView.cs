@@ -9,6 +9,8 @@ namespace RecentWorkspaceWidget.Models
         public Border DrivePill { get; set; }
         public TextBlock DriveText { get; set; }
         public TextBlock NameBlock { get; set; }
+        public Border SourceBadge { get; set; }
+        public TextBlock SourceText { get; set; }
         public TextBlock PathBlock { get; set; }
         public Border ActionBtn { get; set; }
         public TextBlock ActionText { get; set; }
