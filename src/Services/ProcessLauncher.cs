@@ -1,10 +1,6 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Text;
-using System.Text.RegularExpressions;
-using System.Threading;
-using System.Windows;
 using RecentWorkspaceWidget.Models;
 
 namespace RecentWorkspaceWidget.Services
@@ -100,7 +96,7 @@ namespace RecentWorkspaceWidget.Services
 
                 ProcessStartInfo psi = new ProcessStartInfo();
                 psi.FileName = info.ExecutablePath;
-                psi.Arguments = "\"" + item.Path + "\"";
+                psi.Arguments = QuoteWindowsArgument(item.Path);
                 psi.WorkingDirectory = item.Path;
                 psi.UseShellExecute = true;
 
@@ -122,7 +118,7 @@ namespace RecentWorkspaceWidget.Services
 
                 ProcessStartInfo psi = new ProcessStartInfo();
                 psi.FileName = "explorer.exe";
-                psi.Arguments = "\"" + item.Path + "\"";
+                psi.Arguments = QuoteWindowsArgument(item.Path);
                 psi.UseShellExecute = true;
                 Process.Start(psi);
                 return true;
@@ -136,85 +132,47 @@ namespace RecentWorkspaceWidget.Services
 
         private static bool LaunchCliAgent(WorkspaceItem item, AgentType type, string agentDisplayName, string agentArgs)
         {
-            string tempBatPath = null;
             try
             {
                 AgentInfo info = AgentDetector.GetAgent(type);
                 NotifyStatus(string.Format("正在启动 {0} [{1}]...", agentDisplayName, item.Name), true);
 
-                // Clean and escape window title to prevent cmd syntax disruption
-                string safeName = Regex.Replace(item.Name ?? "Workspace", @"[&|<>^""()\\%]", " ").Trim();
-                string safeTitle = string.Format("{0}: {1}", agentDisplayName, safeName);
-
-                tempBatPath = Path.Combine(Path.GetTempPath(), string.Format("rw_launch_{0}_{1}.bat", type, Guid.NewGuid().ToString("N").Substring(0, 8)));
-
-                StringBuilder batContent = new StringBuilder();
-                batContent.AppendLine("@echo off");
-                batContent.AppendLine("chcp 65001 >nul");
-                batContent.AppendLine(string.Format("title {0}", safeTitle));
-                batContent.AppendLine("cd /d \"" + item.Path + "\"");
-
-                // Check if target executable is a PowerShell script (.ps1)
+                ProcessStartInfo psi = new ProcessStartInfo();
                 bool isPowerShellScript = info.ExecutablePath.EndsWith(".ps1", StringComparison.OrdinalIgnoreCase);
-
                 if (isPowerShellScript)
                 {
-                    string psCmd = string.Format("powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{0}\"", info.ExecutablePath);
-                    if (!string.IsNullOrEmpty(agentArgs)) psCmd += " " + agentArgs;
-                    batContent.AppendLine(psCmd);
+                    psi.FileName = "powershell.exe";
+                    psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File " + QuoteWindowsArgument(info.ExecutablePath);
+                    if (!string.IsNullOrEmpty(agentArgs)) psi.Arguments += " " + agentArgs;
                 }
                 else
                 {
-                    if (string.IsNullOrEmpty(agentArgs))
-                    {
-                        batContent.AppendLine("\"" + info.ExecutablePath + "\"");
-                    }
-                    else
-                    {
-                        batContent.AppendLine("\"" + info.ExecutablePath + "\" " + agentArgs);
-                    }
+                    psi.FileName = info.ExecutablePath;
+                    psi.Arguments = agentArgs ?? "";
                 }
 
-                File.WriteAllText(tempBatPath, batContent.ToString(), Encoding.GetEncoding("GBK"));
-
-                ProcessStartInfo psi = new ProcessStartInfo();
-                psi.FileName = "cmd.exe";
-                psi.Arguments = "/k \"\"" + tempBatPath + "\"\"";
                 psi.WorkingDirectory = item.Path;
                 psi.UseShellExecute = true;
 
                 Process proc = Process.Start(psi);
                 if (proc == null)
                 {
-                    NotifyStatus(string.Format("启动 cmd.exe 运行 {0} 失败。", agentDisplayName), false);
-                    try { if (File.Exists(tempBatPath)) File.Delete(tempBatPath); } catch { }
+                    NotifyStatus(string.Format("启动 {0} 失败。", agentDisplayName), false);
                     return false;
                 }
-                else
-                {
-                    // Success: schedule cleanup of temporary batch wrapper
-                    string fileToClean = tempBatPath;
-                    ThreadPool.QueueUserWorkItem((s) =>
-                    {
-                        try
-                        {
-                            Thread.Sleep(8000);
-                            if (File.Exists(fileToClean)) File.Delete(fileToClean);
-                        }
-                        catch { }
-                    });
-                    return true;
-                }
+                return true;
             }
             catch (Exception ex)
             {
-                if (!string.IsNullOrEmpty(tempBatPath))
-                {
-                    try { if (File.Exists(tempBatPath)) File.Delete(tempBatPath); } catch { }
-                }
                 NotifyStatus(string.Format("启动 {0} 遇到异常: {1}", agentDisplayName, ex.Message), false);
                 return false;
             }
+        }
+
+        private static string QuoteWindowsArgument(string value)
+        {
+            if (value == null) return "\"\"";
+            return "\"" + value.Replace("\"", "\\\"") + "\"";
         }
 
         private static void NotifyStatus(string message, bool isSuccess)

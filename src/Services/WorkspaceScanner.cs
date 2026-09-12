@@ -148,32 +148,8 @@ namespace RecentWorkspaceWidget.Services
             }
             catch { }
 
-            // 4. Claude Code sessions
-            try
-            {
-                string claudeSessions = Path.Combine(userProfile, @".claude\sessions");
-                if (Directory.Exists(claudeSessions))
-                {
-                    var files = new DirectoryInfo(claudeSessions).GetFiles("*.json");
-                    Array.Sort(files, (a, b) => b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc));
-                    int limit = Math.Min(files.Length, 25);
-                    for (int i = 0; i < limit; i++)
-                    {
-                        try
-                        {
-                            string text = File.ReadAllText(files[i].FullName);
-                            var m = Regex.Match(text, @"""cwd""\s*:\s*""([^""]+)""");
-                            if (m.Success)
-                            {
-                                string cwd = m.Groups[1].Value.Replace(@"\\", @"\");
-                                AddOrUpdateWorkspace(candidates, cwd, files[i].LastWriteTime, "Claude 会话", 85, appData, localAppData, desktop, userProfile);
-                            }
-                        }
-                        catch { }
-                    }
-                }
-            }
-            catch { }
+            // 4. Claude session files are intentionally not read. They may contain
+            // prompts, source code, tool output, or credentials unrelated to indexing.
 
             // 5. Controlled Depth Recursion (MaxDepth = 2) on developer roots
             try
